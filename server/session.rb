@@ -102,7 +102,7 @@ class Session
   end
 
   def queue_outgoing(data)
-    @outgoing_data = @outgoing_data + data
+    @outgoing_data = @outgoing_data + data.force_encoding("ASCII-8BIT")
     notify_subscribers(:session_data_queued, [@id, data])
   end
 
@@ -196,7 +196,7 @@ class Session
 
     # Validate the acknowledgement number
     if(!valid_ack?(packet.body.ack))
-      notify_subscribers(:dnscat2_session_error, [@id, "Bad acknowledgement number: expected 0x%04x, received 0x%04x" % [@my_seq, packet.ack]])
+      notify_subscribers(:dnscat2_session_error, [@id, "Bad acknowledgement number: expected 0x%04x, received 0x%04x" % [@my_seq, packet.body.ack]])
 
       # Re-send the last packet
       old_data = next_outgoing(actual_msg_max_length(max_length))

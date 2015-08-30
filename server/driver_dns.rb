@@ -64,7 +64,7 @@ class DriverDNS
       :encoder         => Proc.new() do |name|
         i = 0
         (name.length.chr + name).chars.each_slice(3).map(&:join).map do |ip|
-          ip = ip.ljust(3, "\xFF")
+          ip = ip.force_encoding('ASCII-8BIT').ljust(3, "\xFF".force_encoding('ASCII-8BIT'))
           i += 1
           "%d.%d.%d.%d" % ([i] + ip.bytes.to_a) # Return
         end
@@ -80,7 +80,7 @@ class DriverDNS
       :encoder         => Proc.new() do |name|
         i = 0
         (name.length.chr + name).chars.each_slice(15).map(&:join).map do |ip|
-          ip = ip.ljust(15, "\xFF")
+          ip = ip.force_encoding('ASCII-8BIT').ljust(15, "\xFF".force_encoding('ASCII-8BIT'))
           i += 1
           ([i] + ip.bytes.to_a).each_slice(2).map do |octet|
             "%04x" % [octet[0] << 8 | octet[1]]
@@ -94,9 +94,9 @@ class DriverDNS
   def initialize(host, port, domains)
     Log::PRINT(nil, "Starting Dnscat2 DNS server on #{host}:#{port} [domains = #{(domains.nil? || domains.length == 0) ? "n/a" : domains.join(", ")}]...")
     if(domains.nil? || domains.length == 0)
-      Log::PRINT(nil, "No domains were selected, which means this server will only respond to direct queries (using --host and --port on the client)")
+      Log::PRINT(nil, "No domains were selected, which means this server will only respond to direct queries (using \"--dns server=x.x.x.x,port=yyy\" on the client)")
     else
-      Log::PRINT(nil, "Will also accept direct queries (using --host and --port on the client)")
+      Log::PRINT(nil, "Will also accept direct queries (using \"--dns server=x.x.x.x,port=yyy\" on the client)")
     end
 
     @host        = host
@@ -129,14 +129,14 @@ class DriverDNS
   def DriverDNS.figure_out_name(name, domains)
     # Check if it's one of our domains
     domains.each do |domain|
-      if(name =~ /^(.*)\.(#{domain})/)
+      if(name =~ /^(.*)\.(#{domain})/i)
         return $1, $2
       end
     end
 
     # Check if it starts with dnscat, which is used when
     # the server is unknown
-    if(name =~ /^dnscat\.(.*)$/)
+    if(name =~ /^dnscat\.(.*)$/i)
       return $1, nil
     end
 
@@ -168,7 +168,7 @@ class DriverDNS
       domain_regex = "(^dnscat\\.|" + (domains.map { |x| "\\.#{x}$" }).join("|") + ")"
 
       # Only match proper domains with proper record types
-      match(/#{domain_regex}/, RECORD_TYPES.keys) do |transaction|
+      match(/#{domain_regex}/i, RECORD_TYPES.keys) do |transaction|
         begin
           # Determine the type
           type = transaction.resource_class

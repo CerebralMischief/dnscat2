@@ -25,7 +25,7 @@ require 'trollop'
 
 # version info
 NAME = "dnscat2"
-VERSION = "0.01"
+VERSION = "0.03"
 
 # Capture log messages during start up - after creating a command session, all
 # messages go to it, instead
@@ -103,15 +103,15 @@ if(domains.length > 0)
   Log.PRINT(nil, "You can also run a directly-connected client:")
 else
   Log.PRINT(nil, "It looks like you didn't give me any domains to recognize!")
-  Log.PRINT(nil, "That's cool, though, you can still use a direct connection!")
+  Log.PRINT(nil, "That's cool, though, you can still use a direct connection.")
   Log.PRINT(nil, "Try running this on your client:")
 end
 
 Log.PRINT(nil)
-Log.PRINT(nil, "./dnscat2 --host <server>")
+Log.PRINT(nil, "./dnscat2 --dns server=<server>")
 Log.PRINT(nil)
 Log.PRINT(nil, "Of course, you have to figure out <server> yourself! Clients will connect")
-Log.PRINT(nil, "directly on UDP port 53.")
+Log.PRINT(nil, "directly on UDP port 53 (by default).")
 Log.PRINT(nil)
 
 settings = Settings.new()
