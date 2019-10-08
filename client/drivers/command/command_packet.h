@@ -11,6 +11,7 @@
 
 #include <stdlib.h>
 
+#include "libs/buffer.h"
 #include "libs/types.h"
 
 #ifdef WIN32
@@ -30,9 +31,19 @@ typedef enum
   COMMAND_DOWNLOAD  = 0x0003,
   COMMAND_UPLOAD    = 0x0004,
   COMMAND_SHUTDOWN  = 0x0005,
+  COMMAND_DELAY     = 0x0006,
+
+  TUNNEL_CONNECT    = 0x1000,
+  TUNNEL_DATA       = 0x1001,
+  TUNNEL_CLOSE      = 0x1002,
 
   COMMAND_ERROR     = 0xFFFF,
 } command_packet_type_t;
+
+typedef enum
+{
+  TUNNEL_STATUS_FAIL = 0x8000,
+} tunnel_status_t;
 
 typedef struct
 {
@@ -51,6 +62,10 @@ typedef struct
         struct { char *filename; } download;
         struct { char *filename; uint8_t *data; uint32_t length; } upload;
         struct { int dummy; } shutdown;
+        struct { uint32_t delay; } delay;
+        struct { uint32_t options; char *host; uint16_t port; } tunnel_connect;
+        struct { uint32_t tunnel_id; uint8_t *data; size_t length; } tunnel_data;
+        struct { uint32_t tunnel_id; char *reason; } tunnel_close;
         struct { uint16_t status; char *reason; } error;
       } body;
     } request;
@@ -64,6 +79,10 @@ typedef struct
         struct { uint8_t *data; uint32_t length; } download;
         struct { int dummy; } upload;
         struct { int dummy; } shutdown;
+        struct { int dummy; } delay;
+        struct { uint16_t status; uint32_t tunnel_id; } tunnel_connect;
+        struct { int dummy; } tunnel_data;
+        struct { int dummy; } tunnel_close;
         struct { uint16_t status; char *reason; } error;
       } body;
     } response;
@@ -71,7 +90,7 @@ typedef struct
 } command_packet_t;
 
 /* Parse a packet from a byte stream. */
-command_packet_t *command_packet_parse(uint8_t *data, uint32_t length, NBBOOL is_request);
+command_packet_t *command_packet_read(buffer_t *buffer);
 
 /* Create a packet with the given characteristics. */
 command_packet_t *command_packet_create_ping_request(uint16_t request_id, char *data);
@@ -91,6 +110,15 @@ command_packet_t *command_packet_create_upload_response(uint16_t request_id);
 
 command_packet_t *command_packet_create_shutdown_response(uint16_t request_id);
 
+command_packet_t *command_packet_create_delay_response(uint16_t request_id);
+
+command_packet_t *command_packet_create_tunnel_connect_request(uint16_t request_id, uint32_t options, char *host, uint16_t port);
+command_packet_t *command_packet_create_tunnel_connect_response(uint16_t request_id, uint32_t tunnel_id);
+
+command_packet_t *command_packet_create_tunnel_data_request(uint16_t request_id, uint32_t tunnel_id, uint8_t *data, uint32_t length);
+
+command_packet_t *command_packet_create_tunnel_close_request(uint16_t request_id, uint32_t tunnel_id, char *reason);
+
 command_packet_t *command_packet_create_error_request(uint16_t request_id, uint16_t status, char *reason);
 command_packet_t *command_packet_create_error_response(uint16_t request_id, uint16_t status, char *reason);
 
@@ -102,6 +130,6 @@ void command_packet_destroy(command_packet_t *packet);
 void command_packet_print(command_packet_t *packet);
 
 /* Needs to be freed with safe_free() */
-uint8_t *command_packet_to_bytes(command_packet_t *packet, uint32_t *length);
+uint8_t *command_packet_to_bytes(command_packet_t *packet, size_t *length);
 
 #endif

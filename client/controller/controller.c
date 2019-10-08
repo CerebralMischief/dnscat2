@@ -24,7 +24,7 @@
 
 #include "controller.h"
 
-static int max_retransmits = 10;
+static int max_retransmits = 20;
 
 typedef struct _session_entry_t
 {
@@ -170,6 +170,7 @@ uint8_t *controller_get_outgoing(size_t *length, size_t max_length)
 
   if(!session)
   {
+    /* TODO: Drop to a "probe for sessions" mode instead. */
     LOG_FATAL("There are no active sessions left! Goodbye!");
     exit(0);
     return NULL;

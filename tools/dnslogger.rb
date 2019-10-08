@@ -11,11 +11,13 @@
 $LOAD_PATH << File.dirname(__FILE__) # A hack to make this work on 1.8/1.9
 
 require 'trollop'
-require 'rubydns'
+require '../server/libs/dnser'
 
 # version info
 NAME = "dnslogger"
 VERSION = "v1.0.0"
+
+Thread.abort_on_exception = true
 
 # Options
 opts = Trollop::options do
@@ -25,9 +27,8 @@ opts = Trollop::options do
   opt :host,    "The ip address to listen on",  :type => :string,  :default => "0.0.0.0"
   opt :port,    "The port to listen on",        :type => :integer, :default => 53
 
-  opt :passthrough,   "If enabled, forward DNS requests upstream",        :type => :boolean, :default => false
-  opt :upstream,      "The upstream DNS server to use for --passthrough", :type => :string,  :default => "8.8.8.8"
-  opt :upstream_port, "The port to use for upstream requests",            :type => :integer, :default => 53
+  opt :passthrough,   "Set to a host:port, and unanswered queries will be sent there", :type => :string, :default => nil
+  opt :packet_trace,  "If enabled, print details about the packets",                   :type => :boolean, :default => false
 
   opt :A,       "Response to send back for 'A' requests",     :type => :string,  :default => nil
   opt :AAAA,    "Response to send back for 'AAAA' requests",  :type => :string,  :default => nil
@@ -35,6 +36,7 @@ opts = Trollop::options do
   opt :TXT,     "Response to send back for 'TXT' requests",   :type => :string,  :default => nil
   opt :MX,      "Response to send back for 'MX' requests",    :type => :string,  :default => nil
   opt :MX_PREF, "The preference order for the MX record",     :type => :integer, :default => 10
+  opt :NS,      "Response to send back for 'NS' requests",    :type => :string,  :default => nil
 
   opt :ttl, "The TTL value to return", :type => :integer, :default => 60
 end
@@ -43,57 +45,63 @@ if(opts[:port] < 0 || opts[:port] > 65535)
   Trollop::die :port, "must be a valid port (between 0 and 65535)"
 end
 
-puts("#{NAME} #{VERSION} is starting!")
+puts("Starting #{NAME} #{VERSION} DNS server on #{opts[:host]}:#{opts[:port]}")
 
-# Use upstream DNS for name resolution.
-UPSTREAM = RubyDNS::Resolver.new([[:udp, opts[:upstream], opts[:upstream_port]]])
+pt_host = pt_port = nil
+if(opts[:passthrough])
+  pt_host, pt_port = opts[:passthrough].split(/:/, 2)
+  pt_port = pt_port || 53
+  puts("Any queries without a specific answer will be sent to #{pt_host}:#{pt_port}")
+end
 
-# Get a handle to these things
-Name = Resolv::DNS::Name
-IN = Resolv::DNS::Resource::IN
+dnser = DNSer.new(opts[:host], opts[:port])
 
-puts(nil, "Starting #{NAME} DNS server on #{opts[:host]}:#{opts[:port]}")
+dnser.on_request() do |transaction|
+  request = transaction.request
 
-interfaces = [
-  [:udp, opts[:host], opts[:port]],
-]
+  if(request.questions.length < 1)
+    puts("The request didn't ask any questions!")
+    next
+  end
 
-RubyDNS::run_server(:listen => interfaces) do |s|
-  # Turn off DNS logging
-  s.logger.level = Logger::WARN
+  if(request.questions.length > 1)
+    puts("The request asked multiple questions! This is super unusual, if you can reproduce, please report!")
+    next
+  end
 
-  # Capture all requests
-  otherwise do |transaction|
-    name = transaction.name
-    type = transaction.resource_class.name.gsub(/.*::/, '')
+  question = request.questions[0]
 
-    # If they provided a way to handle it, to that
-    if(opts[type.to_sym])
-      if(transaction.resource_class == IN::MX)
-        puts("Got a request for #{name.to_s} [type = #{type}], responding with #{opts[:MX_PREF]} #{opts[:MX]}")
-        transaction.respond!(opts[:MX_PREF], Name.create(opts[:MX]))
-      elsif(transaction.resource_class == IN::A || transaction.resource_class == IN::AAAA || transaction.resource_class == IN::TXT)
-        puts("Got a request for #{name.to_s} [type = #{type}], responding with #{opts[type.to_sym]}")
-        transaction.respond!(opts[type.to_sym])
-      elsif(transaction.resource_class == IN::CNAME)
-        puts("Got a request for #{name.to_s} [type = #{type}], responding with #{opts[type.to_sym]}")
-        transaction.respond!(Name.create(opts[type.to_sym]))
-      else
-        puts("Got a request for #{name.to_s} [type = #{type}], and thought I could handle it, but can't. Please report this on github.com/iagox86/dnscat2/issues")
-        transaction.fail!(:NXDomain)
-      end
+  puts(request.to_s(!opts[:packet_trace]))
 
-    # If they didn't provide a response, but they requested upstream, do that
-    elsif(opts[:passthrough])
-      puts("Got a request for #{name.to_s} [type = #{type}], sending to #{opts[:upstream]}:#{opts[:upstream_port]}")
-      transaction.passthrough!(UPSTREAM)
-
-    # Otherwise, just fail the request
+  # If they provided a way to handle it, to that
+  response = question.type_s ? opts[question.type_s.to_sym] : nil
+  if(response)
+    if(question.type == DNSer::Packet::TYPE_MX)
+      answer = question.answer(opts[:ttl], response, opts[:MX_PREF])
     else
-      puts("Got a request for #{name.to_s} [type = #{type}], responding with NXDomain")
-      transaction.fail!(:NXDomain)
+      answer = question.answer(opts[:ttl], response)
     end
 
-    transaction
+    transaction.add_answer(answer)
+    puts(transaction.response.to_s(!opts[:packet_trace]))
+    transaction.reply!()
+  else
+    if(pt_host)
+      transaction.passthrough!(pt_host, pt_port, Proc.new() do |packet|
+        puts(packet.to_s(!opts[:packet_trace]))
+      end)
+      puts("OUT: (...forwarding upstream...)")
+    else
+      transaction.error!(DNSer::Packet::RCODE_NAME_ERROR)
+      puts(transaction.response.to_s(!opts[:packet_trace]))
+    end
   end
+
+  if(!transaction.sent)
+    raise(StandardError, "Oops! We didn't send the response! Please file a bug")
+  end
+
 end
+
+# Wait for it to finish (never-ending, essentially)
+dnser.wait()

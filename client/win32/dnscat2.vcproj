@@ -190,7 +190,11 @@
 				>
 			</File>
 			<File
-				RelativePath="..\drivers\command\command_packet_stream.c"
+				RelativePath="..\drivers\command\commands_standard.h"
+				>
+			</File>
+			<File
+				RelativePath="..\drivers\command\commands_tunnel.h"
 				>
 			</File>
 			<File
@@ -230,6 +234,14 @@
 				>
 			</File>
 			<File
+				RelativePath="..\libs\crypto\encryptor.c"
+				>
+			</File>
+			<File
+				RelativePath="..\libs\ll.c"
+				>
+			</File>
+			<File
 				RelativePath="..\libs\log.c"
 				>
 			</File>
@@ -246,11 +258,19 @@
 				>
 			</File>
 			<File
+				RelativePath="..\libs\crypto\salsa20.c"
+				>
+			</File>
+			<File
 				RelativePath="..\libs\select_group.c"
 				>
 			</File>
 			<File
 				RelativePath="..\controller\session.c"
+				>
+			</File>
+			<File
+				RelativePath="..\libs\crypto\sha3.c"
 				>
 			</File>
 			<File
@@ -265,6 +285,10 @@
 				RelativePath="..\libs\udp.c"
 				>
 			</File>
+			<File
+				RelativePath="..\libs\crypto\micro-ecc\uECC.c"
+				>
+			</File>
 		</Filter>
 		<Filter
 			Name="Header Files"
@@ -272,7 +296,27 @@
 			UniqueIdentifier="{93995380-89BD-4b04-88EB-625FBE52EBFB}"
 			>
 			<File
+				RelativePath="..\libs\crypto\micro-ecc\asm_arm.inc"
+				>
+			</File>
+			<File
+				RelativePath="..\libs\crypto\micro-ecc\asm_arm_mult_square.inc"
+				>
+			</File>
+			<File
+				RelativePath="..\libs\crypto\micro-ecc\asm_avr.inc"
+				>
+			</File>
+			<File
+				RelativePath="..\libs\crypto\micro-ecc\asm_avr_mult_square.inc"
+				>
+			</File>
+			<File
 				RelativePath="..\libs\buffer.h"
+				>
+			</File>
+			<File
+				RelativePath="..\libs\crypto\byte_order.h"
 				>
 			</File>
 			<File
@@ -280,11 +324,11 @@
 				>
 			</File>
 			<File
-				RelativePath="..\drivers\command\command_packet_stream.h"
+				RelativePath="..\controller\controller.h"
 				>
 			</File>
 			<File
-				RelativePath="..\controller\controller.h"
+				RelativePath="..\libs\crypto\micro-ecc\curve-specific.inc"
 				>
 			</File>
 			<File
@@ -316,6 +360,18 @@
 				>
 			</File>
 			<File
+				RelativePath="..\libs\crypto\encryptor.h"
+				>
+			</File>
+			<File
+				RelativePath="..\libs\crypto\encryptor_sas_dict.h"
+				>
+			</File>
+			<File
+				RelativePath="..\libs\ll.h"
+				>
+			</File>
+			<File
 				RelativePath="..\libs\log.h"
 				>
 			</File>
@@ -332,7 +388,15 @@
 				>
 			</File>
 			<File
+				RelativePath="..\libs\crypto\micro-ecc\platform-specific.inc"
+				>
+			</File>
+			<File
 				RelativePath="..\libs\pstdint.h"
+				>
+			</File>
+			<File
+				RelativePath="..\libs\crypto\salsa20.h"
 				>
 			</File>
 			<File
@@ -341,6 +405,10 @@
 			</File>
 			<File
 				RelativePath="..\controller\session.h"
+				>
+			</File>
+			<File
+				RelativePath="..\libs\crypto\sha3.h"
 				>
 			</File>
 			<File
@@ -356,7 +424,23 @@
 				>
 			</File>
 			<File
+				RelativePath="..\libs\crypto\micro-ecc\types.h"
+				>
+			</File>
+			<File
 				RelativePath="..\libs\udp.h"
+				>
+			</File>
+			<File
+				RelativePath="..\libs\crypto\micro-ecc\uecc.h"
+				>
+			</File>
+			<File
+				RelativePath="..\libs\crypto\micro-ecc\uECC_vli.h"
+				>
+			</File>
+			<File
+				RelativePath="..\libs\crypto\ustd.h"
 				>
 			</File>
 		</Filter>

@@ -73,10 +73,12 @@ static char *buffer_read_dns_name_at(buffer_t *buffer, uint32_t offset, uint32_t
   {
     if(piece_length & 0x80)
     {
-      if(piece_length == 0xc0)
+      if(piece_length & 0xc0)
       {
         uint8_t relative_pos = buffer_read_int8_at(buffer, offset + pos);
         char *new_data;
+
+	relative_pos |= ((piece_length & 0x03) << 8);
         pos++;
 
         new_data = buffer_read_dns_name_at(buffer, relative_pos, NULL);
@@ -1288,40 +1290,6 @@ char *dns_get_system()
 
   return NULL;
 #endif
-}
-
-void dns_do_test(char *domain)
-{
-    buffer_t *command;
-    char *command_str;
-
-    command = buffer_create(BO_NETWORK);
-    buffer_add_string(command, "dnstest ");
-    buffer_add_ntstring(command, domain);
-    command_str = (char*) buffer_create_string_and_destroy(command, NULL);
-    if(system(command_str))
-    {
-        safe_free(command_str);
-        command = buffer_create(BO_NETWORK);
-        buffer_add_string(command, "./dnstest ");
-        buffer_add_ntstring(command, domain);
-        command_str = (char*) buffer_create_string_and_destroy(command, NULL);
-        if(system(command_str))
-        {
-            safe_free(command_str);
-            command = buffer_create(BO_NETWORK);
-            buffer_add_string(command, "./dnstest ");
-            buffer_add_ntstring(command, domain);
-            command_str = (char*) buffer_create_string_and_destroy(command, NULL);
-            if(system(command_str))
-            {
-                fprintf(stderr, "Couldn't figure out how to run 'dnstest'. Sorry!\n");
-                exit(1);
-            }
-        }
-    }
-    safe_free(command_str);
-    exit(0);
 }
 
 int dns_is_error(dns_t *dns)

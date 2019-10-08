@@ -7,6 +7,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #ifdef WIN32
 #include "libs/pstdint.h"
@@ -19,12 +20,6 @@
 #include "libs/memory.h"
 
 #include "packet.h"
-
-/* Header for snprintf(), since cygwin doesn't expose it on c89
- * programs. */
-#ifndef __APPLE__
-int snprintf(char *STR, size_t SIZE, const char *FORMAT, ...);
-#endif
 
 packet_t *packet_parse(uint8_t *data, size_t length, options_t options)
 {
@@ -47,30 +42,40 @@ packet_t *packet_parse(uint8_t *data, size_t length, options_t options)
     case PACKET_TYPE_SYN:
       packet->body.syn.seq     = buffer_read_next_int16(buffer);
       packet->body.syn.options = buffer_read_next_int16(buffer);
+      if(packet->body.syn.options & OPT_NAME)
+        packet->body.syn.name = buffer_alloc_next_ntstring(buffer);
       break;
 
     case PACKET_TYPE_MSG:
-      if(options & OPT_CHUNKED_DOWNLOAD)
-      {
-        packet->body.msg.options.chunked.chunk = buffer_read_next_int32(buffer);
-      }
-      else
-      {
-        packet->body.msg.options.normal.seq     = buffer_read_next_int16(buffer);
-        packet->body.msg.options.normal.ack     = buffer_read_next_int16(buffer);
-      }
+      packet->body.msg.seq     = buffer_read_next_int16(buffer);
+      packet->body.msg.ack     = buffer_read_next_int16(buffer);
       packet->body.msg.data    = buffer_read_remaining_bytes(buffer, &packet->body.msg.data_length, -1, FALSE);
       break;
 
     case PACKET_TYPE_FIN:
       packet->body.fin.reason = buffer_alloc_next_ntstring(buffer);
-
       break;
 
     case PACKET_TYPE_PING:
       packet->body.ping.data = buffer_alloc_next_ntstring(buffer);
-
       break;
+
+#ifndef NO_ENCRYPTION
+    case PACKET_TYPE_ENC:
+      packet->body.enc.subtype = buffer_read_next_int16(buffer);
+      packet->body.enc.flags   = buffer_read_next_int16(buffer);
+
+      switch(packet->body.enc.subtype)
+      {
+        case PACKET_ENC_SUBTYPE_INIT:
+          buffer_read_next_bytes(buffer, packet->body.enc.public_key, 64);
+          break;
+        case PACKET_ENC_SUBTYPE_AUTH:
+          buffer_read_next_bytes(buffer, packet->body.enc.authenticator, 32);
+          break;
+      }
+      break;
+#endif
 
     default:
       LOG_FATAL("Error: unknown message type (0x%02x)\n", packet->packet_type);
@@ -126,31 +131,45 @@ packet_t *packet_create_syn(uint16_t session_id, uint16_t seq, options_t options
   return packet;
 }
 
-packet_t *packet_create_msg_normal(uint16_t session_id, uint16_t seq, uint16_t ack, uint8_t *data, size_t data_length)
+void packet_syn_set_name(packet_t *packet, char *name)
 {
-  packet_t *packet = (packet_t*) safe_malloc(sizeof(packet_t));
+  if(packet->packet_type != PACKET_TYPE_SYN)
+  {
+    LOG_FATAL("Attempted to set the 'name' field of a non-SYN message\n");
+    exit(1);
+  }
 
-  packet->packet_type                 = PACKET_TYPE_MSG;
-  packet->packet_id                   = rand() % 0xFFFF;
-  packet->session_id                  = session_id;
-  packet->body.msg.options.normal.seq = seq;
-  packet->body.msg.options.normal.ack = ack;
-  packet->body.msg.data               = safe_memcpy(data, data_length);
-  packet->body.msg.data_length        = data_length;
+  /* Free the name if it's already set */
+  if(packet->body.syn.name)
+    safe_free(packet->body.syn.name);
 
-  return packet;
+  packet->body.syn.options |= OPT_NAME;
+  packet->body.syn.name = safe_strdup(name);
 }
 
-packet_t *packet_create_msg_chunked(uint16_t session_id, uint32_t chunk)
+void packet_syn_set_is_command(packet_t *packet)
+{
+  if(packet->packet_type != PACKET_TYPE_SYN)
+  {
+    LOG_FATAL("Attempted to set the 'is_command' field of a non-SYN message\n");
+    exit(1);
+  }
+
+  /* Just set the field, we don't need anything else. */
+  packet->body.syn.options |= OPT_COMMAND;
+}
+
+packet_t *packet_create_msg(uint16_t session_id, uint16_t seq, uint16_t ack, uint8_t *data, size_t data_length)
 {
   packet_t *packet = (packet_t*) safe_malloc(sizeof(packet_t));
 
-  packet->packet_type                    = PACKET_TYPE_MSG;
-  packet->packet_id                      = rand() % 0xFFFF;
-  packet->session_id                     = session_id;
-  packet->body.msg.options.chunked.chunk = chunk;
-  packet->body.msg.data                  = safe_memcpy("", 0);
-  packet->body.msg.data_length           = 0;
+  packet->packet_type          = PACKET_TYPE_MSG;
+  packet->packet_id            = rand() % 0xFFFF;
+  packet->session_id           = session_id;
+  packet->body.msg.seq         = seq;
+  packet->body.msg.ack         = ack;
+  packet->body.msg.data        = safe_memcpy(data, data_length);
+  packet->body.msg.data_length = data_length;
 
   return packet;
 }
@@ -179,77 +198,43 @@ packet_t *packet_create_ping(uint16_t session_id, char *data)
   return packet;
 }
 
-void packet_syn_set_name(packet_t *packet, char *name)
+#ifndef NO_ENCRYPTION
+packet_t *packet_create_enc(uint16_t session_id, uint16_t flags)
 {
-  if(packet->packet_type != PACKET_TYPE_SYN)
+  packet_t *packet = (packet_t*) safe_malloc(sizeof(packet_t));
+
+  packet->packet_type = PACKET_TYPE_ENC;
+  packet->packet_id   = rand() % 0xFFFF;
+  packet->session_id  = session_id;
+  packet->body.enc.subtype     = -1;
+
+  return packet;
+}
+
+void packet_enc_set_init(packet_t *packet, uint8_t *public_key)
+{
+  if(packet->packet_type != PACKET_TYPE_ENC)
   {
-    LOG_FATAL("Attempted to set the 'name' field of a non-SYN message\n");
+    LOG_FATAL("Attempted to set encryption options for a non-ENC message\n");
     exit(1);
   }
 
-  /* Free the name if it's already set */
-  if(packet->body.syn.name)
-    safe_free(packet->body.syn.name);
-
-  packet->body.syn.options |= OPT_NAME;
-  packet->body.syn.name = safe_strdup(name);
+  packet->body.enc.subtype = PACKET_ENC_SUBTYPE_INIT;
+  memcpy(packet->body.enc.public_key, public_key, 64);
 }
 
-void packet_syn_set_download(packet_t *packet, char *filename)
+void packet_enc_set_auth(packet_t *packet, uint8_t *authenticator)
 {
-  if(packet->packet_type != PACKET_TYPE_SYN)
+  if(packet->packet_type != PACKET_TYPE_ENC)
   {
-    LOG_FATAL("Attempted to set the 'download' field of a non-SYN message\n");
+    LOG_FATAL("Attempted to set encryption options for a non-ENC message\n");
     exit(1);
   }
 
-  /* Free the name if it's already set */
-  if(packet->body.syn.filename)
-    safe_free(packet->body.syn.filename);
-
-  packet->body.syn.options |= OPT_DOWNLOAD;
-  packet->body.syn.filename = safe_strdup(filename);
+  packet->body.enc.subtype = PACKET_ENC_SUBTYPE_AUTH;
+  memcpy(packet->body.enc.authenticator, authenticator, 32);
 }
-
-void packet_syn_set_chunked_download(packet_t *packet)
-{
-  if(packet->packet_type != PACKET_TYPE_SYN)
-  {
-    LOG_FATAL("Attempted to set the 'download chunk' field of a non-SYN message\n");
-    exit(1);
-  }
-
-  /* Just set the field, we don't need anything else. */
-  packet->body.syn.options |= OPT_CHUNKED_DOWNLOAD;
-}
-
-void packet_syn_set_is_command(packet_t *packet)
-{
-  if(packet->packet_type != PACKET_TYPE_SYN)
-  {
-    LOG_FATAL("Attempted to set the 'is_command' field of a non-SYN message\n");
-    exit(1);
-  }
-
-  /* Just set the field, we don't need anything else. */
-  packet->body.syn.options |= OPT_COMMAND;
-}
-
-size_t packet_get_syn_size()
-{
-  static size_t size = 0;
-
-  /* If the size isn't known yet, calculate it. */
-  if(size == 0)
-  {
-    packet_t *p = packet_create_syn(0, 0, (options_t)0);
-    uint8_t *data = packet_to_bytes(p, &size, (options_t)0);
-    safe_free(data);
-    packet_destroy(p);
-  }
-
-  return size;
-}
+#endif
 
 size_t packet_get_msg_size(options_t options)
 {
@@ -260,27 +245,8 @@ size_t packet_get_msg_size(options_t options)
   {
     packet_t *p;
 
-    if(options & OPT_CHUNKED_DOWNLOAD)
-      p = packet_create_msg_chunked(0, 0);
-    else
-      p = packet_create_msg_normal(0, 0, 0, (uint8_t *)"", 0);
+    p = packet_create_msg(0, 0, 0, (uint8_t *)"", 0);
     safe_free(packet_to_bytes(p, &size, options));
-    packet_destroy(p);
-  }
-
-  return size;
-}
-
-size_t packet_get_fin_size(options_t options)
-{
-  static size_t size = 0;
-
-  /* If the size isn't known yet, calculate it. */
-  if(size == 0)
-  {
-    packet_t *p = packet_create_fin(0, "");
-    uint8_t *data = packet_to_bytes(p, &size, options);
-    safe_free(data);
     packet_destroy(p);
   }
 
@@ -303,6 +269,20 @@ size_t packet_get_ping_size()
   return size;
 }
 
+/* TODO: This is a little hacky - converting it to a bytestream and back to
+ * clone - but it's by far the easiest way! */
+packet_t *packet_clone(packet_t *packet, options_t options)
+{
+  uint8_t  *packet_bytes  = NULL;
+  size_t    packet_length = -1;
+  packet_t *result;
+
+  packet_bytes = packet_to_bytes(packet, &packet_length, options);
+  result = packet_parse(packet_bytes, packet_length, options);
+  safe_free(packet_bytes);
+  return result;
+}
+
 uint8_t *packet_to_bytes(packet_t *packet, size_t *length, options_t options)
 {
   buffer_t *buffer = buffer_create(BO_BIG_ENDIAN);
@@ -318,38 +298,49 @@ uint8_t *packet_to_bytes(packet_t *packet, size_t *length, options_t options)
       buffer_add_int16(buffer, packet->body.syn.options);
 
       if(packet->body.syn.options & OPT_NAME)
-      {
         buffer_add_ntstring(buffer, packet->body.syn.name);
-      }
-      if(packet->body.syn.options & OPT_DOWNLOAD)
-      {
-        buffer_add_ntstring(buffer, packet->body.syn.filename);
-      }
 
       break;
 
     case PACKET_TYPE_MSG:
-      if(options & OPT_CHUNKED_DOWNLOAD)
-      {
-        buffer_add_int32(buffer, packet->body.msg.options.chunked.chunk);
-      }
-      else
-      {
-        buffer_add_int16(buffer, packet->body.msg.options.normal.seq);
-        buffer_add_int16(buffer, packet->body.msg.options.normal.ack);
-      }
+      buffer_add_int16(buffer, packet->body.msg.seq);
+      buffer_add_int16(buffer, packet->body.msg.ack);
       buffer_add_bytes(buffer, packet->body.msg.data, packet->body.msg.data_length);
       break;
 
     case PACKET_TYPE_FIN:
       buffer_add_ntstring(buffer, packet->body.fin.reason);
-
       break;
 
     case PACKET_TYPE_PING:
       buffer_add_ntstring(buffer, packet->body.ping.data);
-
       break;
+
+#ifndef NO_ENCRYPTION
+    case PACKET_TYPE_ENC:
+      buffer_add_int16(buffer, packet->body.enc.subtype);
+      buffer_add_int16(buffer, packet->body.enc.flags);
+
+      if(packet->body.enc.subtype == PACKET_ENC_SUBTYPE_INIT)
+      {
+        buffer_add_bytes(buffer, packet->body.enc.public_key, 64);
+      }
+      else if(packet->body.enc.subtype == PACKET_ENC_SUBTYPE_AUTH)
+      {
+        buffer_add_bytes(buffer, packet->body.enc.authenticator, 32);
+      }
+      else if(packet->body.enc.subtype == -1)
+      {
+        LOG_FATAL("Error: One of the packet_enc_set_*() functions have to be called!");
+        exit(1);
+      }
+      else
+      {
+        LOG_FATAL("Error: Unknown encryption subtype: 0x%04x", packet->body.enc.subtype);
+        exit(1);
+      }
+      break;
+#endif
 
     default:
       LOG_FATAL("Error: Unknown message type: %u\n", packet->packet_type);
@@ -359,69 +350,34 @@ uint8_t *packet_to_bytes(packet_t *packet, size_t *length, options_t options)
   return buffer_create_string_and_destroy(buffer, length);
 }
 
-char *packet_to_s(packet_t *packet, options_t options)
-{
-  /* This is ugly, but I don't have a good automatic "printf" allocator. */
-  char *ret = safe_malloc(1024);
-
-#ifdef WIN32
-  if(packet->packet_type == PACKET_TYPE_SYN)
-  {
-    _snprintf_s(ret, 1024, 1024, "Type = SYN :: [0x%04x] session = 0x%04x, seq = 0x%04x, options = 0x%04x", packet->packet_id, packet->session_id, packet->body.syn.seq, packet->body.syn.options);
-  }
-  else if(packet->packet_type == PACKET_TYPE_MSG)
-  {
-    if(options & OPT_CHUNKED_DOWNLOAD)
-      _snprintf_s(ret, 1024, 1024, "Type = MSG :: [0x%04x] session = 0x%04x, chunk = 0x%04x", packet->packet_id, packet->session_id, packet->body.msg.options.chunked.chunk, packet->body.msg.data_length);
-    else
-      _snprintf_s(ret, 1024, 1024, "Type = MSG :: [0x%04x] session = 0x%04x, seq = 0x%04x, ack = 0x%04x", packet->packet_id, packet->session_id, packet->body.msg.options.normal.seq, packet->body.msg.options.normal.ack, packet->body.msg.data_length);
-  }
-  else if(packet->packet_type == PACKET_TYPE_FIN)
-  {
-    _snprintf_s(ret, 1024, 1024, "Type = FIN :: [0x%04x] session = 0x%04x :: %s", packet->packet_id, packet->session_id, packet->body.fin.reason);
-  }
-  else if(packet->packet_type == PACKET_TYPE_PING)
-  {
-    _snprintf_s(ret, 1024, 1024, "Type = PING :: [0x%04x] data = %s", packet->packet_id, packet->body.ping.data);
-  }
-  else
-  {
-    _snprintf_s(ret, 1024, 1024, "Unknown packet type!");
-  }
-#else
-  if(packet->packet_type == PACKET_TYPE_SYN)
-  {
-    snprintf(ret, 1024, "Type = SYN :: [0x%04x] session = 0x%04x, seq = 0x%04x, options = 0x%04x", packet->packet_id, packet->session_id, packet->body.syn.seq, packet->body.syn.options);
-  }
-  else if(packet->packet_type == PACKET_TYPE_MSG)
-  {
-    if(options & OPT_CHUNKED_DOWNLOAD)
-      snprintf(ret, 1024, "Type = MSG :: [0x%04x] session = 0x%04x, chunk = 0x%04x, data = 0x%x bytes", packet->packet_id, packet->session_id, packet->body.msg.options.chunked.chunk, (unsigned int)packet->body.msg.data_length);
-    else
-      snprintf(ret, 1024, "Type = MSG :: [0x%04x] session = 0x%04x, seq = 0x%04x, ack = 0x%04x, data = 0x%x bytes", packet->packet_id, packet->session_id, packet->body.msg.options.normal.seq, packet->body.msg.options.normal.ack, (unsigned int)packet->body.msg.data_length);
-  }
-  else if(packet->packet_type == PACKET_TYPE_FIN)
-  {
-    snprintf(ret, 1024, "Type = FIN :: [0x%04x] session = 0x%04x :: %s", packet->packet_id, packet->session_id, packet->body.fin.reason);
-  }
-  else if(packet->packet_type == PACKET_TYPE_PING)
-  {
-    snprintf(ret, 1024, "Type = PING :: [0x%04x] data = %s", packet->packet_id, packet->body.ping.data);
-  }
-  else
-  {
-    snprintf(ret, 1024, "Unknown packet type!");
-  }
-#endif
-
-  return ret;
-}
-
 void packet_print(packet_t *packet, options_t options)
 {
-  char *str = packet_to_s(packet, options);
-  printf("%s\n", str);
-  safe_free(str);
+  if(packet->packet_type == PACKET_TYPE_SYN)
+  {
+    printf("Type = SYN :: [0x%04x] session = 0x%04x, seq = 0x%04x, options = 0x%04x", packet->packet_id, packet->session_id, packet->body.syn.seq, packet->body.syn.options);
+  }
+  else if(packet->packet_type == PACKET_TYPE_MSG)
+  {
+    printf("Type = MSG :: [0x%04x] session = 0x%04x, seq = 0x%04x, ack = 0x%04x, data = 0x%x bytes", packet->packet_id, packet->session_id, packet->body.msg.seq, packet->body.msg.ack, (unsigned int)packet->body.msg.data_length);
+  }
+  else if(packet->packet_type == PACKET_TYPE_FIN)
+  {
+    printf("Type = FIN :: [0x%04x] session = 0x%04x :: %s", packet->packet_id, packet->session_id, packet->body.fin.reason);
+  }
+  else if(packet->packet_type == PACKET_TYPE_PING)
+  {
+    printf("Type = PING :: [0x%04x] data = %s", packet->packet_id, packet->body.ping.data);
+  }
+#ifndef NO_ENCRYPTION
+  else if(packet->packet_type == PACKET_TYPE_ENC)
+  {
+    printf("Type = ENC :: [0x%04x] session = 0x%04x", packet->packet_id, packet->session_id);
+  }
+#endif
+  else
+  {
+    printf("Unknown packet type!");
+  }
 }
 
 void packet_destroy(packet_t *packet)
@@ -430,8 +386,6 @@ void packet_destroy(packet_t *packet)
   {
     if(packet->body.syn.name)
       safe_free(packet->body.syn.name);
-    if(packet->body.syn.filename)
-      safe_free(packet->body.syn.filename);
   }
 
   if(packet->packet_type == PACKET_TYPE_MSG)
@@ -452,6 +406,35 @@ void packet_destroy(packet_t *packet)
       safe_free(packet->body.ping.data);
   }
 
+#ifndef NO_ENCRYPTION
+  if(packet->packet_type == PACKET_TYPE_ENC)
+  {
+    /* Nothing was allocated. */
+  }
+#endif
+
   safe_free(packet);
 }
 
+char *packet_type_to_string(packet_type_t type)
+{
+  switch(type)
+  {
+    case PACKET_TYPE_SYN:
+      return "SYN";
+    case PACKET_TYPE_MSG:
+      return "MSG";
+    case PACKET_TYPE_FIN:
+      return "FIN";
+    case PACKET_TYPE_PING:
+      return "PING";
+#ifndef NO_ENCRYPTION
+    case PACKET_TYPE_ENC:
+      return "ENC";
+#endif
+    case PACKET_TYPE_COUNT_NOT_PING:
+      return "Unknown!";
+  }
+
+  return "Unknown";
+}

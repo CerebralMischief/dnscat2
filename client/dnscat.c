@@ -17,20 +17,24 @@
 #else
 #include <getopt.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
+#include <signal.h>
 #endif
 
 #include "controller/controller.h"
 #include "controller/session.h"
 #include "libs/buffer.h"
+#include "libs/ll.h"
 #include "libs/log.h"
 #include "libs/memory.h"
 #include "libs/select_group.h"
 #include "libs/udp.h"
 #include "tunnel_drivers/driver_dns.h"
+#include "tunnel_drivers/tunnel_driver.h"
 
 /* Default options */
 #define NAME    "dnscat2"
-#define VERSION "v0.03"
+#define VERSION "v0.07"
 
 /* Default options */
 #define DEFAULT_DNS_HOST NULL
@@ -40,6 +44,113 @@
 select_group_t *group         = NULL;
 driver_dns_t   *tunnel_driver = NULL;
 char           *system_dns    = NULL;
+
+typedef struct
+{
+  char *process;
+} exec_options_t;
+
+typedef struct
+{
+  driver_type_t type;
+  union
+  {
+    exec_options_t exec;
+  } options;
+} make_driver_t;
+
+static make_driver_t *make_console()
+{
+  make_driver_t *make_driver = (make_driver_t*) safe_malloc(sizeof(make_driver_t));
+  make_driver->type = DRIVER_TYPE_CONSOLE;
+
+  return make_driver;
+}
+
+static make_driver_t *make_command()
+{
+  make_driver_t *make_driver = (make_driver_t*) safe_malloc(sizeof(make_driver_t));
+  make_driver->type = DRIVER_TYPE_COMMAND;
+
+  return make_driver;
+}
+
+static make_driver_t *make_ping()
+{
+  make_driver_t *make_driver = (make_driver_t*) safe_malloc(sizeof(make_driver_t));
+  make_driver->type = DRIVER_TYPE_PING;
+
+  return make_driver;
+}
+
+static make_driver_t *make_exec(char *process)
+{
+  make_driver_t *make_driver = (make_driver_t*) safe_malloc(sizeof(make_driver_t));
+  make_driver->type = DRIVER_TYPE_EXEC;
+  make_driver->options.exec.process = process;
+
+  return make_driver;
+}
+
+static int create_drivers(ll_t *drivers)
+{
+  int num_created = 0;
+  make_driver_t *this_driver;
+
+  while((this_driver = ll_remove_first(drivers)))
+  {
+    num_created++;
+    switch(this_driver->type)
+    {
+      case DRIVER_TYPE_CONSOLE:
+        printf("Creating a console session!\n");
+        controller_add_session(session_create_console(group, "console"));
+        break;
+
+      case DRIVER_TYPE_EXEC:
+        printf("Creating a exec('%s') session!\n", this_driver->options.exec.process);
+        controller_add_session(session_create_exec(group, this_driver->options.exec.process, this_driver->options.exec.process));
+        break;
+
+      case DRIVER_TYPE_COMMAND:
+        printf("Creating a command session!\n");
+        controller_add_session(session_create_command(group, "command"));
+        break;
+
+      case DRIVER_TYPE_PING:
+        printf("Creating a ping session!\n");
+        controller_add_session(session_create_ping(group, "ping"));
+        break;
+    }
+    safe_free(this_driver);
+  }
+
+  /* Default to creating a command session. */
+  if(num_created == 0)
+  {
+    num_created++;
+    controller_add_session(session_create_command(group, "command"));
+  }
+
+  return num_created;
+}
+
+typedef struct
+{
+  char     *host;
+  uint16_t  port;
+  char     *server;
+  char     *domain;
+} dns_options_t;
+
+typedef struct
+{
+  tunnel_driver_type_t type;
+  union
+  {
+    dns_options_t dns_options;
+  };
+} make_tunnel_driver_t;
 
 static void cleanup(void)
 {
@@ -75,10 +186,15 @@ void usage(char *name, char *message)
 "                         the next message (by default, when a response is\n"
 "                         received, the next message is immediately transmitted.\n"
 " --max-retransmits <n>   Only re-transmit a message <n> times before giving up\n"
-"                         and assuming the server is dead (default: 10).\n"
+"                         and assuming the server is dead (default: 20).\n"
 " --retransmit-forever    Set if you want the client to re-transmit forever\n"
 "                         until a server turns up. This can be helpful, but also\n"
 "                         makes the server potentially run forever.\n"
+#ifndef NO_ENCRYPTION
+" --secret                Set the shared secret; set the same one on the server\n"
+"                         and the client to prevent man-in-the-middle attacks!\n"
+" --no-encryption         Turn off encryption/authentication.\n"
+#endif
 "\n"
 "Input options:\n"
 " --console               Send/receive output to the console.\n"
@@ -133,6 +249,31 @@ void usage(char *name, char *message)
 
 driver_dns_t *create_dns_driver_internal(select_group_t *group, char *domain, char *host, uint16_t port, char *type, char *server)
 {
+  if(!server && !domain)
+  {
+    printf("\n");
+    printf("** WARNING!\n");
+    printf("*\n");
+    printf("* It looks like you're running dnscat2 with the system DNS server,\n");
+    printf("* and no domain name!");
+    printf("*\n");
+    printf("* That's cool, I'm not going to stop you, but the odds are really,\n");
+    printf("* really high that this won't work. You either need to provide a\n");
+    printf("* domain to use DNS resolution (requires an authoritative server):\n");
+    printf("*\n");
+    printf("*     dnscat mydomain.com\n");
+    printf("*\n");
+    printf("* Or you have to provide a server to connect directly to:\n");
+    printf("*\n");
+    printf("*     dnscat --dns=server=1.2.3.4,port=53\n");
+    printf("*\n");
+    printf("* I'm going to let this keep running, but once again, this likely\n");
+    printf("* isn't what you want!\n");
+    printf("*\n");
+    printf("** WARNING!\n");
+    printf("\n");
+  }
+
   if(!server)
     server = system_dns;
 
@@ -232,6 +373,10 @@ int main(int argc, char *argv[])
     {"steady",             no_argument,       0, 0}, /* Don't transmit immediately after getting a response. */
     {"max-retransmits",    required_argument, 0, 0}, /* Set the max retransmissions */
     {"retransmit-forever", no_argument,       0, 0}, /* Retransmit forever if needed */
+#ifndef NO_ENCRYPTION
+    {"secret",             required_argument, 0, 0}, /* Pre-shared secret */
+    {"no-encryption",      no_argument,       0, 0}, /* Disable encryption */
+#endif
 
     /* i/o options. */
     {"console", no_argument,       0, 0}, /* Enable console */
@@ -255,17 +400,15 @@ int main(int argc, char *argv[])
     {0,              0,                 0, 0}  /* End */
   };
 
-  char              c;
+  int               c;
   int               option_index;
   const char       *option_name;
 
   NBBOOL            tunnel_driver_created = FALSE;
-  NBBOOL            driver_created        = FALSE;
-
+  ll_t             *drivers_to_create     = ll_create(NULL);
+  uint32_t          drivers_created       = 0;
 
   log_level_t       min_log_level = LOG_LEVEL_WARNING;
-
-  session_t        *session = NULL;
 
   group = select_group_create();
   system_dns = dns_get_system();
@@ -276,12 +419,21 @@ int main(int argc, char *argv[])
   /* This is required for win32 support. */
   winsock_initialize();
 
+#ifndef WIN32  
+  /* set the SIGCHLD handler to SIG_IGN causing zombie child processes to be reaped automatically */
+  if(signal(SIGCHLD, SIG_IGN) == SIG_ERR) 
+  {
+    perror("Couldn't set SIGCHLD handler to SIG_IGN");
+    exit(1);
+  }  
+#endif
+
   /* Set the default log level */
   log_set_min_console_level(min_log_level);
 
   /* Parse the command line options. */
   opterr = 0;
-  while((c = getopt_long_only(argc, argv, "", long_options, &option_index)) != EOF)
+  while((c = getopt_long_only(argc, argv, "", long_options, &option_index)) != -1)
   {
     switch(c)
     {
@@ -321,45 +473,45 @@ int main(int argc, char *argv[])
         {
           controller_set_max_retransmits(-1);
         }
+#ifndef NO_ENCRYPTION
+        else if(!strcmp(option_name, "secret"))
+        {
+          session_set_preshared_secret(optarg);
+        }
+        else if(!strcmp(option_name, "no-encryption"))
+        {
+          session_set_encryption(FALSE);
+        }
+#endif
 
         /* i/o drivers */
         else if(!strcmp(option_name, "console"))
         {
-          driver_created = TRUE;
+          ll_add(drivers_to_create, ll_32(drivers_created++), make_console());
 
-          session = session_create_console(group, "Console session");
-          controller_add_session(session);
+/*          session = session_create_console(group, "console");
+          controller_add_session(session); */
         }
         else if(!strcmp(option_name, "exec") || !strcmp(option_name, "e"))
         {
-          driver_created = TRUE;
+          ll_add(drivers_to_create, ll_32(drivers_created++), make_exec(optarg));
 
-          session = session_create_exec(group, optarg, optarg);
-          controller_add_session(session);
+/*          session = session_create_exec(group, optarg, optarg);
+          controller_add_session(session); */
         }
         else if(!strcmp(option_name, "command"))
         {
-          driver_created = TRUE;
+          ll_add(drivers_to_create, ll_32(drivers_created++), make_command());
 
-          session = session_create_command(group, "Command session");
-          controller_add_session(session);
+/*          session = session_create_command(group, "command");
+          controller_add_session(session); */
         }
         else if(!strcmp(option_name, "ping"))
         {
-          driver_created = TRUE;
+          ll_add(drivers_to_create, ll_32(drivers_created++), make_ping());
 
-          session = session_create_ping(group, "Ping session");
-          controller_add_session(session);
-        }
-
-        /* Listener options. */
-        else if(!strcmp(option_name, "listen") || !strcmp(option_name, "l"))
-        {
-          LOG_FATAL("--listen isn't implemented yet! :(\n");
-          exit(1);
-          /*listen_port = atoi(optarg);*/
-
-          /*input_type = TYPE_LISTENER;*/
+/*          session = session_create_ping(group, "ping");
+          controller_add_session(session); */
         }
 
         /* Tunnel driver options */
@@ -405,6 +557,25 @@ int main(int argc, char *argv[])
     }
   }
 
+  if(getenv("DNSCAT_DOMAIN")!=NULL) {
+    if(getenv("DNSCAT_SECRET")!=NULL) {
+      session_set_preshared_secret(getenv("DNSCAT_SECRET"));
+    }
+    tunnel_driver = create_dns_driver_internal(group, getenv("DNSCAT_DOMAIN"), "0.0.0.0", 53, DEFAULT_TYPES, NULL);
+    tunnel_driver_created = TRUE;
+  }
+
+  create_drivers(drivers_to_create);
+  ll_destroy(drivers_to_create);
+
+  if(tunnel_driver_created && argv[optind])
+  {
+    printf("It looks like you used --dns and also passed a domain on the commandline.\n");
+    printf("That's not allowed! Either use '--dns domain=xxx' or don't use a --dns\n");
+    printf("argument!\n");
+    exit(1);
+  }
+
   /* If no output was set, use the domain, and use the last option as the
    * domain. */
   if(!tunnel_driver_created)
@@ -422,13 +593,6 @@ int main(int argc, char *argv[])
     {
       tunnel_driver = create_dns_driver_internal(group, argv[optind], "0.0.0.0", 53, DEFAULT_TYPES, NULL);
     }
-  }
-
-  /* If no i/o was set, create a command session. */
-  if(!driver_created)
-  {
-    session = session_create_command(group, "command (default)");
-    controller_add_session(session);
   }
 
   /* Be sure we clean up at exit. */
